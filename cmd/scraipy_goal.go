@@ -21,8 +21,9 @@ func main() {
 	Model := config.GetEnv("OPENROUTER_MODEL", "")
 
 	// 1. Initialize Configuration
-	goal, maxSteps := parseArgs()
-	systemPrompt := getSystemPrompt("cmd/prompts/goal_prompt.txt")
+	goalfp, maxSteps := parseArgs()
+	systemPrompt := ReadPromptFile("cmd/prompts/goal_prompt.txt")
+	goal := ReadPromptFile(goalfp)
 
 	// Create Agent with modernized settings
 	agent := ai.NewAgent(APIKey, Model, systemPrompt)
@@ -36,7 +37,7 @@ func main() {
 	activePage, err := ctx.NewPage()
 	exitOnErr(err)
 
-	fmt.Printf("\n%s[SCRAIPY]%s 🚀 Starting Goal: %s\n", "\033[32m", "\033[0m", goal)
+	fmt.Printf("\n%s[SCRAIPY]%s 🚀 %s\n", "\033[32m", "\033[0m", goal)
 
 	// 3. Execution Loop
 	// We send the goal once; subsequent turns are driven by observations
@@ -74,14 +75,6 @@ func main() {
 		}
 
 		// 4. Command Execution Phase
-
-		// Force a getHTML at the end of every turn to ensure the AI has the latest page state for its next reasoning step.
-		if stepData.Commands[len(stepData.Commands)-1].Action != bridge.GetHTMLAction {
-			stepData.Commands = append(stepData.Commands, ai.Command{
-				Action: bridge.GetHTMLAction,
-			})
-		}
-
 		var turnObservations []string
 		for _, cmd := range stepData.Commands {
 			fmt.Printf("⚙️  %sAction:%s %-12s | Args: %v\n", "\033[36m", "\033[0m", cmd.Action, cmd.Arguments)
@@ -120,14 +113,14 @@ func parseArgs() (string, int) {
 		fmt.Println("Usage: scraipy \"Find the latest news on Go\" [max_steps]")
 		os.Exit(1)
 	}
-	goal := os.Args[1]
+	goalfp := os.Args[1]
 	steps := DefaultMaxSteps
 	if len(os.Args) > 2 {
 		if s, err := strconv.Atoi(os.Args[2]); err == nil {
 			steps = s
 		}
 	}
-	return goal, steps
+	return goalfp, steps
 }
 
 // parseAIResponse cleans and unmarshals the JSON output from the AI
@@ -146,10 +139,10 @@ func parseAIResponse(content string) ai.AgentStep {
 	return step
 }
 
-func getSystemPrompt(path string) string {
+func ReadPromptFile(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("⚠️ Warning: System prompt file not found at %s. Using default internal prompt.", path)
+		log.Printf("⚠️ Warning: Prompt file not found at %s. Using default internal prompt.", path)
 		return "You are a browser agent. Output JSON only."
 	}
 	return string(data)

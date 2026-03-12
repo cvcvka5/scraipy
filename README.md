@@ -43,9 +43,11 @@ OPENROUTER_API_KEY=sk-...
 OPENROUTER_MODEL=openrouter/hunter-alpha
 ```
 
-3. Run the script:
+4. Create a file containing your goal in any format.
+
+5. Run the script:
 ```sh
-go run ./cmd/scraipy_goal.go "Compare the price of the top 3 GPUs on Amazon and Newegg"
+go run ./cmd/scraipy_goal.go "path/to/yourfile.txt"
 ```
 
 
