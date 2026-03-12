@@ -13,7 +13,7 @@ import (
 	"github.com/cvcvka5/scraipy/internal/config"
 )
 
-var DefaultMaxSteps = 100
+var DefaultMaxSteps = 25
 
 func main() {
 	config.LoadEnv()
@@ -41,7 +41,7 @@ func main() {
 
 	// 3. Execution Loop
 	// We send the goal once; subsequent turns are driven by observations
-	currentInput := fmt.Sprintf("USER GOAL: %s\nMAX STEPS: %d steps.\nCURRENT STEP: %d", goal, maxSteps, 1)
+	currentInput := fmt.Sprintf("USER GOAL: %s\nMAX STEPS: %d steps.\nCURRENT STEP: %d\n", goal, maxSteps, 1)
 
 	terminated := false
 	for step := 1; step <= maxSteps; step++ {
