@@ -2,7 +2,7 @@ package bridge
 
 import (
 	"fmt"
-	"log"
+	"math/rand"
 
 	"github.com/playwright-community/playwright-go"
 )
@@ -10,59 +10,44 @@ import (
 type BrowserAction string
 
 const (
-	// Think action for internal reasoning
-	ThinkAction BrowserAction = "think"
-
-	// Returns the current page's full html.
-	GetHTMLAction BrowserAction = "get_html"
-
-	// Changes the current page's url.
-	NavigateAction BrowserAction = "navigate"
-
-	// Clicks on an element.
-	ClickAction BrowserAction = "click"
-
-	// Types text into an input/text-area element.
-	InputAction BrowserAction = "input"
-
-	// Returns an element's inner HTML by its CSS Query
-	LocatorAction BrowserAction = "locator"
-
-	// Scrolls the page by x, y
-	ScrollAction BrowserAction = "scroll"
-
-	// Reloads the current page
-	RefreshAction BrowserAction = "refresh"
-
-	// Pages info
-	PagesInfoAction BrowserAction = "pages_info"
-
-	// Opens a new page
-	NewPageAction BrowserAction = "new_page"
-
-	// Closes the current page
-	ClosePageAction BrowserAction = "close_page"
-
-	// Switches to page at index
-	SwitchPageAction BrowserAction = "switch_page"
-
-	// Sleeps for x seconds
-	SleepAction BrowserAction = "sleep"
+	ThinkAction        BrowserAction = "think"
+	GetHTMLAction      BrowserAction = "get_html"
+	NavigateAction     BrowserAction = "navigate"
+	ClickAction        BrowserAction = "click"
+	InputAction        BrowserAction = "input"
+	ClearInputAction   BrowserAction = "clear_input"
+	HoverAction        BrowserAction = "hover"
+	PressAction        BrowserAction = "press"
+	BackAction         BrowserAction = "back"
+	ForwardAction      BrowserAction = "forward"
+	DragAndDropAction  BrowserAction = "drag_and_drop"
+	EvaluateJSAction   BrowserAction = "evaluate_js"
+	LocatorAction      BrowserAction = "locator"
+	ScrollAction       BrowserAction = "scroll"
+	RefreshAction      BrowserAction = "refresh"
+	PagesInfoAction    BrowserAction = "pages_info"
+	NewPageAction      BrowserAction = "new_page"
+	ClosePageAction    BrowserAction = "close_page"
+	SwitchPageAction   BrowserAction = "switch_page"
+	SleepAction        BrowserAction = "sleep"
+	SelectOptionAction BrowserAction = "select_option"
+	WaitForAction      BrowserAction = "wait_for_selector"
+	GetCookiesAction   BrowserAction = "get_cookies"
 )
 
-// Validate checks if the action string matches our manifest
 func (ba BrowserAction) Validate() bool {
 	switch ba {
-	case ThinkAction, GetHTMLAction, NavigateAction, ClickAction,
-		InputAction, LocatorAction, ScrollAction, RefreshAction,
-		PagesInfoAction, NewPageAction, ClosePageAction, SwitchPageAction,
-		SleepAction:
+	case ThinkAction, GetHTMLAction, NavigateAction, ClickAction, InputAction,
+		ClearInputAction, HoverAction, PressAction, BackAction,
+		ForwardAction, DragAndDropAction, EvaluateJSAction, LocatorAction,
+		ScrollAction, RefreshAction, PagesInfoAction, NewPageAction,
+		ClosePageAction, SwitchPageAction, SleepAction,
+		SelectOptionAction, WaitForAction, GetCookiesAction:
 		return true
 	}
 	return false
 }
 
-// InitBrowser starts the Playwright driver and launches a browser session
 func InitBrowser(headless bool) (playwright.BrowserContext, playwright.Browser, *playwright.Playwright, error) {
 	pw, err := playwright.Run()
 	if err != nil {
@@ -71,31 +56,49 @@ func InitBrowser(headless bool) (playwright.BrowserContext, playwright.Browser, 
 
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		Headless: playwright.Bool(headless),
+		Args: []string{
+			"--disable-blink-features=AutomationControlled",
+			"--no-sandbox",
+			"--disable-infobars",
+		},
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not launch browser: %w", err)
 	}
 
-	// It's often helpful to set a viewport size for consistency
 	context, err := browser.NewContext(playwright.BrowserNewContextOptions{
 		Viewport: &playwright.Size{
-			Width:  1280,
-			Height: 800,
+			Width:  1280 + rand.Intn(50),
+			Height: 800 + rand.Intn(50),
 		},
+		UserAgent: playwright.String("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"),
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create context: %w", err)
 	}
 
+	err = ApplyStealth(context)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("stealth failed: %w", err)
+	}
+
 	return context, browser, pw, nil
 }
 
-// Cleanup gracefully shuts down the browser and driver
+func ApplyStealth(context playwright.BrowserContext) error {
+	// Full human spoofing script provided in previous turn
+	stealthScript := `(() => {
+    try { delete Object.getPrototypeOf(navigator).webdriver; } catch (e) {}
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    // ... rest of the stealth script ...
+    })();`
+
+	return context.AddInitScript(playwright.Script{
+		Content: playwright.String(stealthScript),
+	})
+}
+
 func Cleanup(pw *playwright.Playwright, browser playwright.Browser) {
-	if err := browser.Close(); err != nil {
-		log.Printf("Error closing browser: %v", err)
-	}
-	if err := pw.Stop(); err != nil {
-		log.Printf("Error stopping playwright: %v", err)
-	}
+	_ = browser.Close()
+	_ = pw.Stop()
 }

@@ -1,204 +1,190 @@
 package bridge
 
 import (
+	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/playwright-community/playwright-go"
 )
 
-// ANSI Color codes for prettier terminal logs
-const (
-	colorReset  = "\033[0m"
-	colorBlue   = "\033[34m"
-	colorGreen  = "\033[32m"
-	colorYellow = "\033[33m"
-	colorCyan   = "\033[36m"
-	colorRed    = "\033[31m"
-)
-
-// Global configuration for stability
-const (
-	settleDelay = 750 * time.Millisecond
-	longSettle  = 2 * time.Second
-)
-
-// logAction prints a formatted action log to the terminal
-func logAction(action, detail string) {
-	log.Printf("%s[BRIDGE]%s %s%-12s%s | %s", colorBlue, colorReset, colorCyan, action, colorReset, detail)
-}
-
-// Wait for the page to be useful
-func stabilize(page playwright.Page, duration time.Duration) {
-	page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
-		State: playwright.LoadStateNetworkidle,
-	})
-	time.Sleep(duration)
-}
-
-// HandleGetHTML returns a heavily stripped version of the page content.
-// It removes scripts, styles, SVGs, and hidden elements to keep the context small.
-func HandleGetHTML(page playwright.Page) (string, error) {
-	logAction("GET_HTML", "Extracting interactive elements...")
-	stabilize(page, settleDelay)
-
-	// This script extracts only text and interactive element signatures.
-	// It avoids backslash escaping issues by using a clean template literal.
-	const script = `() => {
-		const results = [];
-		// We target interactive elements and YouTube-specific duration badges
-		const elements = document.querySelectorAll('button, a, input, [role="button"], h1, h2, h3, #video-title, span.ytd-thumbnail-overlay-time-status-renderer');
-		
-		elements.forEach(el => {
-			// Clean up the text content
-			let text = (el.innerText || el.textContent || "").trim().replace(/\s+/g, ' ');
-			
-			// Skip elements that are effectively empty and not inputs
-			if (!text && el.tagName !== 'INPUT') return;
-
-			// Limit text length per element to avoid bloat
-			if (text.length > 200) text = text.substring(0, 200) + "...";
-
-			const id = el.id ? '#' + el.id : '';
-			// Only take the first two classes to keep selectors readable and short
-			const cls = (typeof el.className === 'string' && el.className) 
-				? '.' + el.className.split(/\s+/).filter(c => c && !c.includes('style-scope')).slice(0, 2).join('.') 
-				: '';
-
-			results.push(el.tagName + id + cls + " : " + JSON.stringify(text));
-		});
-		
-		return results.join('\n');
-	}`
-
-	cleaned, err := page.Evaluate(script)
-	if err != nil {
-		log.Printf("%s[ERROR]%s Script execution failed: %v", colorRed, colorReset, err)
-		return "", err
-	}
-
-	res := fmt.Sprintf("%v", cleaned)
-
-	// Final safety truncation
-	if len(res) > 5000 {
-		res = res[:5000] + "\n... [Truncated]"
-	}
-
-	return res, nil
-}
-
-// HandleNavigate changes the URL and waits for load.
 func HandleNavigate(page playwright.Page, url string) (string, error) {
-	logAction("NAVIGATE", url)
 	_, err := page.Goto(url, playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateNetworkidle,
 	})
 	if err != nil {
-		log.Printf("%s[ERROR]%s Navigation failed: %v", colorRed, colorReset, err)
 		return "", err
 	}
-	stabilize(page, longSettle)
-	return "Navigated successfully. Content loaded.", nil
+	return fmt.Sprintf("Navigated to %s", url), nil
 }
 
-// HandleClick interacts with a selector and waits for potential changes.
+func HandleGetHTML(page playwright.Page) (string, error) {
+	cleanedContent, err := page.Evaluate(`() => {
+        const result = {
+            url: window.location.href,
+            title: document.title,
+            interactiveElements: [],
+            headings: [],
+            frames: [],
+            bodyPreview: "",
+        };
+
+        document.querySelectorAll('h1, h2, h3').forEach(h => result.headings.push(h.innerText.trim()));
+        document.querySelectorAll('iframe').forEach(f => result.frames.push({ id: f.id, src: f.src }));
+
+        document.querySelectorAll('input, button, a, [role="button"], select').forEach(el => {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+                result.interactiveElements.push({
+                    tag: el.tagName.toLowerCase(),
+                    text: (el.innerText || el.value || el.placeholder || "").trim().substring(0, 50),
+                    id: el.id,
+                    name: el.getAttribute('name'),
+                    type: el.getAttribute('type')
+                });
+            }
+        });
+
+        result.bodyPreview = document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 1000);
+        return JSON.stringify(result);
+    }`)
+
+	if err != nil {
+		return "", err
+	}
+	return cleanedContent.(string), nil
+}
+
 func HandleClick(page playwright.Page, selector string) (string, error) {
-	logAction("CLICK", selector)
-	err := page.Locator(selector).Click(playwright.LocatorClickOptions{
-		Timeout: playwright.Float(5000),
-	})
+	err := page.Click(selector)
 	if err != nil {
-		log.Printf("%s[ERROR]%s Click failed: %v", colorRed, colorReset, err)
 		return "", err
 	}
-
-	stabilize(page, settleDelay)
-	return "Successfully clicked: " + selector, nil
+	return fmt.Sprintf("Clicked %s", selector), nil
 }
 
-// HandleInput types into a field.
 func HandleInput(page playwright.Page, selector, text string) (string, error) {
-	logAction("INPUT", fmt.Sprintf("[%s] -> %s", selector, text))
-	err := page.Locator(selector).Fill(text)
-	if err != nil {
-		log.Printf("%s[ERROR]%s Input failed: %v", colorRed, colorReset, err)
-		return "", err
-	}
-
-	stabilize(page, settleDelay)
-	return fmt.Sprintf("Typed text into %s", selector), nil
-}
-
-// HandleLocator returns specific element data.
-func HandleLocator(page playwright.Page, selector string) (string, error) {
-	logAction("LOCATOR", selector)
-	stabilize(page, settleDelay)
-	return page.Locator(selector).InnerHTML()
-}
-
-// HandleScroll performs a scroll action via JS execution.
-func HandleScroll(page playwright.Page, x, y int) (string, error) {
-	logAction("SCROLL", fmt.Sprintf("X: %d, Y: %d", x, y))
-	_, err := page.Evaluate(fmt.Sprintf("window.scrollBy(%d, %d)", x, y))
-	if err != nil {
-		return "", err
-	}
-	stabilize(page, settleDelay)
-	return fmt.Sprintf("Scrolled by X:%d, Y:%d", x, y), nil
-}
-
-// HandleRefresh reloads the current page.
-func HandleRefresh(page playwright.Page) (string, error) {
-	logAction("REFRESH", "Reloading page...")
-	_, err := page.Reload(playwright.PageReloadOptions{
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
+	// Using Type instead of Fill to simulate human keystrokes for bot detection
+	err := page.Type(selector, text, playwright.PageTypeOptions{
+		Delay: playwright.Float(100.0),
 	})
 	if err != nil {
 		return "", err
 	}
-	stabilize(page, settleDelay)
-	return "Page refreshed.", nil
+	return fmt.Sprintf("Typed '%s' into %s", text, selector), nil
 }
 
-// HandleSleep handles waiting.
+func HandleSelectOption(page playwright.Page, selector, value string) (string, error) {
+	_, err := page.SelectOption(selector, playwright.SelectOptionValues{
+		Values: playwright.StringSlice(value),
+	})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Selected option %s in %s", value, selector), nil
+}
+
+func HandleWaitForSelector(page playwright.Page, selector string) (string, error) {
+	_, err := page.WaitForSelector(selector, playwright.PageWaitForSelectorOptions{
+		Timeout: playwright.Float(10000), // 10s timeout
+	})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Element %s is now visible", selector), nil
+}
+
+func HandleGetCookies(ctx playwright.BrowserContext) (string, error) {
+	cookies, err := ctx.Cookies()
+	if err != nil {
+		return "", err
+	}
+	data, _ := json.Marshal(cookies)
+	return string(data), nil
+}
+
+func HandleClear(page playwright.Page, selector string) (string, error) {
+	err := page.Fill(selector, "")
+	return fmt.Sprintf("Cleared input at %s", selector), err
+}
+
+func HandleHover(page playwright.Page, selector string) (string, error) {
+	err := page.Locator(selector).Hover()
+	return fmt.Sprintf("Hovered over %s", selector), err
+}
+
+func HandlePress(page playwright.Page, key string) (string, error) {
+	err := page.Keyboard().Press(key)
+	return fmt.Sprintf("Pressed key: %s", key), err
+}
+
+func HandleBack(page playwright.Page) (string, error) {
+	_, err := page.GoBack()
+	return "Went back in history", err
+}
+
+func HandleForward(page playwright.Page) (string, error) {
+	_, err := page.GoForward()
+	return "Went forward in history", err
+}
+
+func HandleUploadFile(page playwright.Page, selector string, paths []string) (string, error) {
+	err := page.Locator(selector).SetInputFiles(paths)
+	return "Files uploaded successfully", err
+}
+
+func HandleDragAndDrop(page playwright.Page, source, target string) (string, error) {
+	err := page.DragAndDrop(source, target)
+	return fmt.Sprintf("Dragged %s to %s", source, target), err
+}
+
+func HandleEval(page playwright.Page, script string) (string, error) {
+	res, err := page.Evaluate(script)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("JS Result: %v", res), nil
+}
+
+func HandleLocator(page playwright.Page, selector string) (string, error) {
+	content, err := page.Locator(selector).First().InnerHTML()
+	if err != nil {
+		return "", err
+	}
+	return content, nil
+}
+
+func HandleScroll(page playwright.Page, x, y int) (string, error) {
+	_, err := page.Evaluate(fmt.Sprintf("window.scrollBy(%d, %d)", x, y))
+	return fmt.Sprintf("Scrolled by x:%d, y:%d", x, y), err
+}
+
+func HandleRefresh(page playwright.Page) (string, error) {
+	_, err := page.Reload()
+	return "Page refreshed", err
+}
+
 func HandleSleep(seconds int) string {
-	logAction("SLEEP", fmt.Sprintf("%d seconds", seconds))
 	time.Sleep(time.Duration(seconds) * time.Second)
 	return fmt.Sprintf("Slept for %d seconds", seconds)
 }
 
-// HandleNewPage opens a new tab.
-func HandleNewPage(ctx playwright.BrowserContext) (playwright.Page, error) {
-	logAction("NEW_PAGE", "Opening new tab...")
-	page, err := ctx.NewPage()
-	if err == nil {
-		stabilize(page, settleDelay)
-	}
-	return page, err
+func HandlePagesInfo(ctx playwright.BrowserContext) int {
+	return len(ctx.Pages())
 }
 
-// HandleSwitchPage focuses on a tab index.
+func HandleNewPage(ctx playwright.BrowserContext) (playwright.Page, error) {
+	return ctx.NewPage()
+}
+
 func HandleSwitchPage(ctx playwright.BrowserContext, index int) (playwright.Page, error) {
-	logAction("SWITCH_PAGE", fmt.Sprintf("Index: %d", index))
 	pages := ctx.Pages()
 	if index < 0 || index >= len(pages) {
-		return nil, fmt.Errorf("invalid page index: %d", index)
+		return nil, fmt.Errorf("page index %d out of bounds", index)
 	}
-	err := pages[index].BringToFront()
-	stabilize(pages[index], settleDelay)
-	return pages[index], err
+	return pages[index], nil
 }
 
-// HandleClosePage closes current page.
 func HandleClosePage(page playwright.Page) error {
-	logAction("CLOSE_PAGE", "Closing active tab...")
 	return page.Close()
-}
-
-// HandlePagesInfo returns count of open tabs.
-func HandlePagesInfo(ctx playwright.BrowserContext) int {
-	count := len(ctx.Pages())
-	logAction("PAGES_INFO", fmt.Sprintf("Active tabs: %d", count))
-	return count
 }
