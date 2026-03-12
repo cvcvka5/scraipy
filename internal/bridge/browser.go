@@ -33,6 +33,7 @@ const (
 	SelectOptionAction BrowserAction = "select_option"
 	WaitForAction      BrowserAction = "wait_for_selector"
 	GetCookiesAction   BrowserAction = "get_cookies"
+	TerminateAction    BrowserAction = "terminate"
 )
 
 func (ba BrowserAction) Validate() bool {
@@ -42,7 +43,7 @@ func (ba BrowserAction) Validate() bool {
 		ForwardAction, DragAndDropAction, EvaluateJSAction, LocatorAction,
 		ScrollAction, RefreshAction, PagesInfoAction, NewPageAction,
 		ClosePageAction, SwitchPageAction, SleepAction,
-		SelectOptionAction, WaitForAction, GetCookiesAction:
+		SelectOptionAction, WaitForAction, GetCookiesAction, TerminateAction:
 		return true
 	}
 	return false

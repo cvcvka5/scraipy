@@ -44,7 +44,14 @@ func (c Command) Handle(ctx playwright.BrowserContext, agent *Agent, currentPage
 		}
 		return ""
 	}
-
+	getBool := func(idx int) bool {
+		if idx < len(c.Arguments) {
+			if b, ok := c.Arguments[idx].(bool); ok {
+				return b
+			}
+		}
+		return false
+	}
 	switch c.Action {
 	case bridge.ThinkAction:
 		result = fmt.Sprintf("Thought Logged: %s", getStr(0))
@@ -127,6 +134,10 @@ func (c Command) Handle(ctx playwright.BrowserContext, agent *Agent, currentPage
 				*currentPage = pages[len(pages)-1]
 			}
 		}
+
+	case bridge.TerminateAction:
+		reason, success := bridge.HandleTerminate(ctx, getStr(0), getBool(1))
+		result = fmt.Sprintf("Terminating session. Reason: %s | Success: %t", reason, success)
 
 	default:
 		err = fmt.Errorf("action %s validated but missing handler mapping", c.Action)

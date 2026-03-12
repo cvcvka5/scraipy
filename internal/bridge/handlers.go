@@ -188,3 +188,11 @@ func HandleSwitchPage(ctx playwright.BrowserContext, index int) (playwright.Page
 func HandleClosePage(page playwright.Page) error {
 	return page.Close()
 }
+
+func HandleTerminate(ctx playwright.BrowserContext, reason string, success bool) (string, bool) {
+	for _, p := range ctx.Pages() {
+		HandleClosePage(p)
+	}
+
+	return reason, success
+}

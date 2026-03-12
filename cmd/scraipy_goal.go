@@ -13,7 +13,7 @@ import (
 	"github.com/cvcvka5/scraipy/internal/config"
 )
 
-var DefaultMaxSteps = 25
+var DefaultMaxSteps = 100
 
 func main() {
 	config.LoadEnv()
@@ -42,6 +42,7 @@ func main() {
 	// We send the goal once; subsequent turns are driven by observations
 	currentInput := fmt.Sprintf("USER GOAL: %s\nMAX STEPS: %d steps.\nCURRENT STEP: %d", goal, maxSteps, 1)
 
+	terminated := false
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n%s--- STEP %d / %d ---%s\n", "\033[35m", step, maxSteps, "\033[0m")
 
@@ -95,8 +96,16 @@ func main() {
 				continue
 			}
 
+			if cmd.Action == bridge.TerminateAction {
+				terminated = true
+				break
+			}
+
 			// We don't need to manually append successful observations here because
 			// cmd.Handle(..., agent, ...) already logs them to the Agent's stateful history.
+		}
+		if terminated {
+			break
 		}
 
 		// Prepare prompt for next turn if still running
