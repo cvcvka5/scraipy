@@ -8,13 +8,15 @@ import (
 	"github.com/playwright-community/playwright-go"
 )
 
+const ToolCallRole = "user"
+
 // Handle executes an AI command against the browser and updates the Agent's memory.
 func (c Command) Handle(ctx playwright.BrowserContext, agent *Agent, currentPage *playwright.Page) (ChatMessage, error) {
-	cm := ChatMessage{Role: "tool"}
+	cm := ChatMessage{Role: ToolCallRole}
 
 	if !c.Action.Validate() {
 		errText := fmt.Sprintf("Error: Action '%s' is not supported.", c.Action)
-		agent.AddMessage("tool", MessagePart{Type: "text", Text: errText})
+		agent.AddMessage(ToolCallRole, MessagePart{Type: "text", Text: errText})
 		cm.Content = []MessagePart{{Type: "text", Text: errText}}
 		return cm, fmt.Errorf("invalid action: %s", c.Action)
 	}
@@ -135,6 +137,9 @@ func (c Command) Handle(ctx playwright.BrowserContext, agent *Agent, currentPage
 			}
 		}
 
+	case bridge.GetCookiesAction:
+		result, err = bridge.HandleGetCookies(ctx)
+
 	case bridge.SelectOptionAction:
 		result, err = bridge.HandleSelectOption(*currentPage, getStr(0), getStr(1))
 
@@ -156,7 +161,8 @@ func (c Command) Handle(ctx playwright.BrowserContext, agent *Agent, currentPage
 	}
 	cm.Content = []MessagePart{{Type: "text", Text: output}}
 
-	agent.AddMessage("user", cm.Content...)
+	agent.AddMessage(ToolCallRole, cm.Content...)
+	fmt.Println("- " + output[:min(len(output), 200)] + "...")
 
 	return cm, err
 }

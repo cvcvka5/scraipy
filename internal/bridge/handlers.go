@@ -3,7 +3,6 @@ package bridge
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -26,62 +25,68 @@ func sanitizeForJSON(str string) string {
 		if unicode.IsPrint(r) {
 			return r
 		}
-		return -1 // Drop the character
+		return -1
 	}, str)
 }
-func extractVisibleText(html string) string {
-	// Remove style|head|script blocks
-	re := regexp.MustCompile(`(?is)<(style|head|script)[^>]*>.*?</(style|head|script)>`)
-	html = re.ReplaceAllString(html, "")
-	// Remove all tags
-	re2 := regexp.MustCompile(`<[^>]+>`)
-	text := re2.ReplaceAllString(html, " ")
-	// Collapse whitespace
-	re3 := regexp.MustCompile(`\s+`)
-	text = strings.TrimSpace(re3.ReplaceAllString(text, " "))
-	// Cap at 6000 chars
-	if len(text) > 6000 {
-		return text[:6000] + " ... [truncated]"
-	}
-	return text
-}
+
 func HandleGetHTML(page playwright.Page) (string, error) {
-	cleanedContent, err := page.Evaluate(`() => {
-        const result = {
-            url: window.location.href,
-            title: document.title,
-            interactiveElements: [],
-            headings: [],
-            frames: [],
-            bodyPreview: "",
-        };
+	result, err := page.Evaluate(`() => {
+		const result = {
+			url: window.location.href,
+			title: document.title,
+			interactiveElements: [],
+			headings: [],
+			frames: [],
+			bodyPreview: "",
+		};
 
-        document.querySelectorAll('h1, h2, h3').forEach(h => result.headings.push(h.innerText.trim()));
-        document.querySelectorAll('iframe').forEach(f => result.frames.push({ id: f.id, src: f.src }));
+		document.querySelectorAll('h1, h2, h3, h4').forEach(h => {
+			const t = h.innerText.trim();
+			if (t) result.headings.push(t);
+		});
 
-        document.querySelectorAll('input, button, a, [role="button"], select, textarea, p, span, h1, h2, h3').forEach(el => {
-            const rect = el.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) {
-                result.interactiveElements.push({
-                    tag: el.tagName.toLowerCase(),
-                    text: (el.innerText || el.value || el.placeholder || "").trim().substring(0, 50),
-                    id: el.id,
-                    name: el.getAttribute('name'),
-                    type: el.getAttribute('type')
-                });
-            }
-        });
+		document.querySelectorAll('iframe').forEach(f => {
+			result.frames.push({ id: f.id, src: f.src });
+		});
 
-        result.bodyPreview = document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 1000);
-        return JSON.stringify(result);
-    }`)
+		document.querySelectorAll('input, button, a, [role="button"], select, textarea').forEach(el => {
+			const rect = el.getBoundingClientRect();
+			if (rect.width === 0 && rect.height === 0) return;
+			const text = (el.innerText || el.value || el.placeholder || "").trim().substring(0, 80);
+			const entry = {
+				tag:       el.tagName.toLowerCase(),
+				text:      text,
+				id:        el.id         || undefined,
+				name:      el.getAttribute('name') || undefined,
+				type:      el.getAttribute('type') || undefined,
+				ariaLabel: el.getAttribute('aria-label') || undefined,
+				href:      el.tagName === 'A' ? el.getAttribute('href') : undefined,
+				class:     el.className  || undefined,
+			};
+			// Drop undefined keys to keep payload lean.
+			Object.keys(entry).forEach(k => entry[k] === undefined && delete entry[k]);
+			result.interactiveElements.push(entry);
+		});
 
+		// Richer body: strip script/style but keep readable text and structure.
+		const clone = document.body.cloneNode(true);
+		clone.querySelectorAll('script, style, noscript, svg').forEach(el => el.remove());
+		result.bodyPreview = clone.innerText.replace(/\s+/g, ' ').trim().substring(0, 3000);
+
+		return JSON.stringify(result);
+	}`)
 	if err != nil {
 		return "", err
 	}
-	return sanitizeForJSON(extractVisibleText(cleanedContent.(string))), nil
-}
 
+	raw, ok := result.(string)
+	if !ok {
+		return "", fmt.Errorf("page.Evaluate returned unexpected type %T", result)
+	}
+
+	// Only sanitize unprintable unicode — do NOT strip JSON structure.
+	return sanitizeForJSON(raw), nil
+}
 func HandleClick(page playwright.Page, selector string) (string, error) {
 	err := page.Click(selector)
 	if err != nil {
@@ -226,56 +231,45 @@ func HandleTerminate(ctx playwright.BrowserContext, reason string, success bool)
 
 // HandleSetCookie handles the "set_cookie" action from the AI.
 // Expected Argument Order:
-// 0: name, 1: value, 2: domain, 3: path, 4: expires (float64), 5: httpOnly (bool), 6: secure (bool)
+// 0: name, 1: value, 2: domain, 3: path
 func HandleSetCookie(context playwright.BrowserContext, args []interface{}) (string, error) {
 	if len(args) < 2 {
-		return "", fmt.Errorf("set_cookie requires at least 'name' and 'value' arguments")
+		return "", fmt.Errorf("set_cookie requires at least 'name' and 'value'")
 	}
 
-	// Basic mandatory fields
+	name := fmt.Sprintf("%v", args[0])
+	value := fmt.Sprintf("%v", args[1])
+
+	var domain string
+	if len(args) > 2 && args[2] != nil && fmt.Sprintf("%v", args[2]) != "" {
+		domain = fmt.Sprintf("%v", args[2])
+	}
+
+	// Use arguments if provided, otherwise fallback to defaults
+	path := "/"
+	if len(args) > 3 && args[3] != nil && fmt.Sprintf("%v", args[3]) != "" {
+		path = fmt.Sprintf("%v", args[3])
+	}
+
+	// Standard security settings required for most modern sites
+	sameSite := playwright.SameSiteAttributeLax
+	secure := true
+	httpOnly := false
+
 	cookie := playwright.OptionalCookie{
-		Name:  fmt.Sprintf("%v", args[0]),
-		Value: fmt.Sprintf("%v", args[1]),
-	}
-
-	// domain
-	if len(args) > 2 && args[2] != nil {
-		v := fmt.Sprintf("%v", args[2])
-		cookie.Domain = &v
-	}
-
-	// path
-	if len(args) > 3 && args[3] != nil {
-		v := fmt.Sprintf("%v", args[3])
-		cookie.Path = &v
-	}
-
-	// expires (Unix time in seconds)
-	if len(args) > 4 && args[4] != nil {
-		if val, ok := args[4].(float64); ok {
-			cookie.Expires = &val
-		}
-	}
-
-	// httpOnly
-	if len(args) > 5 && args[5] != nil {
-		if val, ok := args[5].(bool); ok {
-			cookie.HttpOnly = &val
-		}
-	}
-
-	// secure
-	if len(args) > 6 && args[6] != nil {
-		if val, ok := args[6].(bool); ok {
-			cookie.Secure = &val
-		}
+		Name:     name,
+		Value:    value,
+		Domain:   &domain,
+		Path:     &path,
+		SameSite: sameSite,
+		Secure:   &secure,
+		HttpOnly: &httpOnly,
 	}
 
 	err := context.AddCookies([]playwright.OptionalCookie{cookie})
-
 	if err != nil {
-		return "", fmt.Errorf("failed to set cookie: %w", err)
+		return "", fmt.Errorf("failed to inject: %w", err)
 	}
 
-	return fmt.Sprintf("Successfully injected cookie: '%s' = '%s'", cookie.Name, cookie.Value), nil
+	return fmt.Sprintf("Injected cookie '%s' for domain '%s' at path '%s'", name, domain, path), nil
 }

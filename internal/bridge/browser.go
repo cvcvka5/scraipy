@@ -39,12 +39,9 @@ const (
 
 func (ba BrowserAction) Validate() bool {
 	switch ba {
-	case ThinkAction, GetHTMLAction, NavigateAction, ClickAction, InputAction,
-		ClearInputAction, HoverAction, PressAction, BackAction,
-		ForwardAction, DragAndDropAction, EvaluateJSAction, LocatorAction,
-		ScrollAction, RefreshAction, PagesInfoAction, NewPageAction,
-		ClosePageAction, SwitchPageAction, SleepAction,
-		SelectOptionAction, WaitForAction, GetCookiesAction, TerminateAction:
+	case ThinkAction, GetHTMLAction, NavigateAction, ClickAction, InputAction, ClearInputAction, HoverAction, PressAction, BackAction,
+		ForwardAction, DragAndDropAction, EvaluateJSAction, LocatorAction, ScrollAction, RefreshAction, PagesInfoAction, NewPageAction, ClosePageAction,
+		SwitchPageAction, SleepAction, SelectOptionAction, WaitForAction, GetCookiesAction, SetCookieAction, TerminateAction:
 		return true
 	}
 	return false
