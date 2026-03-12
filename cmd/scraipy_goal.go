@@ -10,88 +10,106 @@ import (
 
 	"github.com/cvcvka5/scraipy/internal/ai"
 	"github.com/cvcvka5/scraipy/internal/bridge"
+	"github.com/cvcvka5/scraipy/internal/config"
 )
 
-const (
-	DefaultAPIKey   = "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"
-	DefaultModel    = "stepfun/step-3.5-flash:free"
-	DefaultMaxSteps = 10
-)
+var DefaultMaxSteps = 25
 
 func main() {
-	// 1. Setup Configuration & Agent
+	config.LoadEnv()
+	APIKey := config.GetEnv("OPENROUTER_API_KEY", "")
+	Model := config.GetEnv("OPENROUTER_MODEL", "")
+
+	// 1. Initialize Configuration
 	goal, maxSteps := parseArgs()
 	systemPrompt := getSystemPrompt("cmd/prompts/goal_prompt.txt")
-	agent := ai.NewAgent(DefaultAPIKey, DefaultModel, systemPrompt)
 
-	// 2. Initialize Browser
-	ctx, browser, pw, err := bridge.InitBrowser(false) // Set to true for headless
+	// Create Agent with modernized settings
+	agent := ai.NewAgent(APIKey, Model, systemPrompt)
+
+	// 2. Initialize Browser Environment
+	// Headless is set to false so you can watch the agent work
+	ctx, browser, pw, err := bridge.InitBrowser(false)
 	exitOnErr(err)
 	defer bridge.Cleanup(pw, browser)
 
 	activePage, err := ctx.NewPage()
 	exitOnErr(err)
 
-	// 3. Main Execution Loop
-	fmt.Printf("🚀 Goal: %s\n", goal)
+	fmt.Printf("\n%s[SCRAIPY]%s 🚀 Starting Goal: %s\n", "\033[32m", "\033[0m", goal)
 
-	// Initial message to get the ball rolling
-	currentInput := fmt.Sprintf("Goal: %s\nMax Steps: %d", goal, maxSteps)
+	// 3. Execution Loop
+	// We send the goal once; subsequent turns are driven by observations
+	currentInput := fmt.Sprintf("USER GOAL: %s\nMAX STEPS: %d steps.\nCURRENT STEP: %d", goal, maxSteps, 1)
 
 	for step := 1; step <= maxSteps; step++ {
-		fmt.Printf("\n--- [Step %d/%d] ---\n", step, maxSteps)
+		fmt.Printf("\n%s--- STEP %d / %d ---%s\n", "\033[35m", step, maxSteps, "\033[0m")
 
-		// Get AI instructions
+		// Get structured instructions from AI
 		resp, err := agent.SendText("user", currentInput)
 		if err != nil {
-			log.Printf("❌ AI Error: %v", err)
+			log.Printf("🛑 Critical AI Error: %v", err)
 			break
 		}
 
+		if len(resp.Choices) == 0 {
+			log.Println("⚠️ AI returned no choices.")
+			break
+		}
+
+		// Parse the JSON Step
 		aiJSON := resp.Choices[0].Message.Content
+		stepData := parseAIResponse(aiJSON)
 
-		// Parse commands
-		instructions := parseAIResponse(aiJSON)
+		// Print Reasoning
+		if stepData.Plan != "" {
+			fmt.Printf("🧠 %sPlan:%s %s\n", "\033[33m", "\033[0m", stepData.Plan)
+		}
 
-		// If no commands, the AI likely thinks it's finished
-		if len(instructions.Commands) == 0 {
-			fmt.Println("✅ Goal reached or AI stopped.")
+		// Check if AI is finished
+		if len(stepData.Commands) == 0 {
+			fmt.Printf("\n✅ %s[TERMINATED]%s %s\n", "\033[32m", "\033[0m", stepData.Observation)
 			break
 		}
 
-		// Execute commands and collect observations
-		var observations []string
-		for _, cmd := range instructions.Commands {
-			fmt.Printf("⚙️ Executing: %s\n", cmd.Action)
+		// 4. Command Execution Phase
 
-			obsMsg, err := cmd.Handle(ctx, agent, &activePage)
+		// Force a getHTML at the end of every turn to ensure the AI has the latest page state for its next reasoning step.
+		if stepData.Commands[len(stepData.Commands)-1].Action != bridge.GetHTMLAction {
+			stepData.Commands = append(stepData.Commands, ai.Command{
+				Action: bridge.GetHTMLAction,
+			})
+		}
+
+		var turnObservations []string
+		for _, cmd := range stepData.Commands {
+			fmt.Printf("⚙️  %sAction:%s %-12s | Args: %v\n", "\033[36m", "\033[0m", cmd.Action, cmd.Arguments)
+
+			// Handle the command via bridge
+			// Note: cmd.Handle internally adds the observation to agent history via AddMessage("tool", ...)
+			_, err := cmd.Handle(ctx, agent, &activePage)
+
 			if err != nil {
-				obsStr := fmt.Sprintf("Action %s failed: %v", cmd.Action, err)
-				observations = append(observations, obsStr)
-				// Also add the error to history so the AI knows it failed
-				agent.AddMessage("user", ai.MessagePart{Type: "text", Text: obsStr})
+				errMsg := fmt.Sprintf("Action '%s' failed: %v", cmd.Action, err)
+				turnObservations = append(turnObservations, errMsg)
 				continue
 			}
 
-			// Extract observation text and add to agent memory
-			obsText := obsMsg.Content[0].Text
-			observations = append(observations, obsText)
-			agent.AddMessage("user", ai.MessagePart{Type: "text", Text: obsText})
+			// We don't need to manually append successful observations here because
+			// cmd.Handle(..., agent, ...) already logs them to the Agent's stateful history.
 		}
 
-		// Prepare input for next turn
-		currentInput = strings.Join(observations, "\n")
-		if len(currentInput) > 2000 {
-			currentInput = currentInput[:2000] + "... [truncated]"
-		}
+		// Prepare prompt for next turn if still running
+		// We tell the AI to look at its own history for the results of the tool calls.
+		currentInput = fmt.Sprintf("COMMANDS EXECUTED. CHECK YOUR HISTORY.\nUSER GOAL: %s\nMAX STEPS: %d steps.\nCURRENT STEP: %d", goal, maxSteps, step)
 	}
 }
 
-// --- Helpers ---
-
+// parseArgs handles CLI inputs
 func parseArgs() (string, int) {
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run . \"your goal\" [max_steps]")
+		fmt.Println("Usage: scraipy \"Find the latest news on Go\" [max_steps]")
+		os.Exit(1)
 	}
 	goal := os.Args[1]
 	steps := DefaultMaxSteps
@@ -103,27 +121,34 @@ func parseArgs() (string, int) {
 	return goal, steps
 }
 
+// parseAIResponse cleans and unmarshals the JSON output from the AI
 func parseAIResponse(content string) ai.AgentStep {
-	// Clean markdown formatting if present
+	// Cleanup markdown blocks if the AI ignored system instructions
+	content = strings.TrimSpace(content)
 	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
 	content = strings.TrimSuffix(content, "```")
 	content = strings.TrimSpace(content)
 
 	var step ai.AgentStep
 	if err := json.Unmarshal([]byte(content), &step); err != nil {
-		log.Printf("⚠️ Failed to parse JSON: %v", err)
+		log.Printf("⚠️ JSON Parse Warning: %v\nRaw Content: %s", err, content)
 	}
 	return step
 }
 
 func getSystemPrompt(path string) string {
 	data, err := os.ReadFile(path)
-	exitOnErr(err)
+	if err != nil {
+		log.Printf("⚠️ Warning: System prompt file not found at %s. Using default internal prompt.", path)
+		return "You are a browser agent. Output JSON only."
+	}
 	return string(data)
 }
 
 func exitOnErr(err error) {
 	if err != nil {
-		log.Fatal(err)
+		fmt.Printf("\n%s[FATAL]%s %v\n", "\033[31m", "\033[0m", err)
+		os.Exit(1)
 	}
 }
