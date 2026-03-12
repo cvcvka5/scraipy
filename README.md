@@ -30,7 +30,20 @@ Traditional scrapers break the second a CSS class changes. Scraipy doesn't care.
 - Collaborative Mode: Real-time human-in-the-loop for CAPTCHA solving or 2FA entry.
 
 ## Quick Start
-Fire up Scraipy with a single command:
+1. Clone the project:
+```sh
+git clone https://github.com/cvcvka5/scraipy.git
+```
+
+2. Create '.env' in the project root.
+
+3. Set the environment variables in .env:
+```.env
+OPENROUTER_API_KEY=sk-...
+OPENROUTER_MODEL=openrouter/hunter-alpha
+```
+
+3. Run the script:
 ```sh
 go run ./cmd/scraipy_goal.go "Compare the price of the top 3 GPUs on Amazon and Newegg"
 ```
