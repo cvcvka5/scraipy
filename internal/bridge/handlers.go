@@ -3,7 +3,10 @@ package bridge
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/playwright-community/playwright-go"
 )
@@ -18,6 +21,30 @@ func HandleNavigate(page playwright.Page, url string) (string, error) {
 	return fmt.Sprintf("Navigated to %s", url), nil
 }
 
+func sanitizeForJSON(str string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1 // Drop the character
+	}, str)
+}
+func extractVisibleText(html string) string {
+	// Remove style|head|script blocks
+	re := regexp.MustCompile(`(?is)<(style|head|script)[^>]*>.*?</(style|head|script)>`)
+	html = re.ReplaceAllString(html, "")
+	// Remove all tags
+	re2 := regexp.MustCompile(`<[^>]+>`)
+	text := re2.ReplaceAllString(html, " ")
+	// Collapse whitespace
+	re3 := regexp.MustCompile(`\s+`)
+	text = strings.TrimSpace(re3.ReplaceAllString(text, " "))
+	// Cap at 6000 chars
+	if len(text) > 6000 {
+		return text[:6000] + " ... [truncated]"
+	}
+	return text
+}
 func HandleGetHTML(page playwright.Page) (string, error) {
 	cleanedContent, err := page.Evaluate(`() => {
         const result = {
@@ -32,7 +59,7 @@ func HandleGetHTML(page playwright.Page) (string, error) {
         document.querySelectorAll('h1, h2, h3').forEach(h => result.headings.push(h.innerText.trim()));
         document.querySelectorAll('iframe').forEach(f => result.frames.push({ id: f.id, src: f.src }));
 
-        document.querySelectorAll('input, button, a, [role="button"], select').forEach(el => {
+        document.querySelectorAll('input, button, a, [role="button"], select, textarea, p, span, h1, h2, h3').forEach(el => {
             const rect = el.getBoundingClientRect();
             if (rect.width > 0 && rect.height > 0) {
                 result.interactiveElements.push({
@@ -52,7 +79,7 @@ func HandleGetHTML(page playwright.Page) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return cleanedContent.(string), nil
+	return sanitizeForJSON(extractVisibleText(cleanedContent.(string))), nil
 }
 
 func HandleClick(page playwright.Page, selector string) (string, error) {
@@ -195,4 +222,60 @@ func HandleTerminate(ctx playwright.BrowserContext, reason string, success bool)
 	}
 
 	return reason, success
+}
+
+// HandleSetCookie handles the "set_cookie" action from the AI.
+// Expected Argument Order:
+// 0: name, 1: value, 2: domain, 3: path, 4: expires (float64), 5: httpOnly (bool), 6: secure (bool)
+func HandleSetCookie(context playwright.BrowserContext, args []interface{}) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("set_cookie requires at least 'name' and 'value' arguments")
+	}
+
+	// Basic mandatory fields
+	cookie := playwright.OptionalCookie{
+		Name:  fmt.Sprintf("%v", args[0]),
+		Value: fmt.Sprintf("%v", args[1]),
+	}
+
+	// domain
+	if len(args) > 2 && args[2] != nil {
+		v := fmt.Sprintf("%v", args[2])
+		cookie.Domain = &v
+	}
+
+	// path
+	if len(args) > 3 && args[3] != nil {
+		v := fmt.Sprintf("%v", args[3])
+		cookie.Path = &v
+	}
+
+	// expires (Unix time in seconds)
+	if len(args) > 4 && args[4] != nil {
+		if val, ok := args[4].(float64); ok {
+			cookie.Expires = &val
+		}
+	}
+
+	// httpOnly
+	if len(args) > 5 && args[5] != nil {
+		if val, ok := args[5].(bool); ok {
+			cookie.HttpOnly = &val
+		}
+	}
+
+	// secure
+	if len(args) > 6 && args[6] != nil {
+		if val, ok := args[6].(bool); ok {
+			cookie.Secure = &val
+		}
+	}
+
+	err := context.AddCookies([]playwright.OptionalCookie{cookie})
+
+	if err != nil {
+		return "", fmt.Errorf("failed to set cookie: %w", err)
+	}
+
+	return fmt.Sprintf("Successfully injected cookie: '%s' = '%s'", cookie.Name, cookie.Value), nil
 }

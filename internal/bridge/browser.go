@@ -33,6 +33,7 @@ const (
 	SelectOptionAction BrowserAction = "select_option"
 	WaitForAction      BrowserAction = "wait_for_selector"
 	GetCookiesAction   BrowserAction = "get_cookies"
+	SetCookieAction    BrowserAction = "set_cookie"
 	TerminateAction    BrowserAction = "terminate"
 )
 

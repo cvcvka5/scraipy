@@ -135,6 +135,12 @@ func (c Command) Handle(ctx playwright.BrowserContext, agent *Agent, currentPage
 			}
 		}
 
+	case bridge.SelectOptionAction:
+		result, err = bridge.HandleSelectOption(*currentPage, getStr(0), getStr(1))
+
+	case bridge.SetCookieAction:
+		result, err = bridge.HandleSetCookie(ctx, c.Arguments)
+
 	case bridge.TerminateAction:
 		reason, success := bridge.HandleTerminate(ctx, getStr(0), getBool(1))
 		result = fmt.Sprintf("Terminating session. Reason: %s | Success: %t", reason, success)

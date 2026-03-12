@@ -20,11 +20,12 @@ ACTION MANIFEST
 - hover [selector: string]: Hovers the mouse over an element.
 - press [key: string]: Presses a specific keyboard key (e.g., "Enter", "Tab").
 - drag_and_drop : Drags source element to target element.
-- evaluate_js [script: string]: Executes JavaScript and returns the result. Use for complex extraction.
+- evaluate_js [script: string]: Executes JavaScript function and returns the result.
 - locator [selector: string]: Extracts inner HTML/text of a specific element to save context space.
 - scroll [x: int, y: int]: Scroll the page (e.g., 0, 500 to scroll down).
 - wait_for_selector [selector: string]: Pauses execution until a specific element appears.
 - get_cookies []: Returns all cookies for the current context.
+- set_cookie [name: string, value: string, domain: string, path: string, expires: float64, httpOnly: bool, secure: bool]: Sets a cookie in the browser context. Useful for session injection or bypassing simple auth.
 - refresh []: Reloads the current page.
 - sleep [seconds: int]: Hard pause for specific duration. Use sparingly.
 - new_page []: Opens a new blank tab and shifts focus to it.
@@ -35,11 +36,45 @@ ACTION MANIFEST
 - back []: Navigates backward in history.
 - terminate [message: string, success: boolean]: Ends the session and provides the final answer to the user.
 
+## CRITICAL EVALUATE_JS RULES
+1. FUNCTION WRAPPING: You must wrap your logic in a callable arrow function or function block inside the string.
+- CORRECT: "() => {
+  let a = 15
+  let b = 5648
+
+  return a * b
+}"
+- INCORRECT: "let a = 15; let b = 2315; a+b;"
+- INCORRECT: "let a = 15;
+let b = 2315;
+console.log(a+b);
+"
+2. JSON ESCAPING: Since the script is inside a JSON string, you MUST use single quotes ' for internal JS strings to avoid escaping hell.
+- CORRECT: "() => { return document.querySelector('.price').innerText; }"
+
+3. NO NAKED FUNCTIONS: Never output () => {} without surrounding quotes ". It must be a JSON-valid string.
+
+4. THE "SHADOW COMPILER" PROTOCOL
+Before sending any evaluate_js block, you must internally simulate execution:
+Variable Trace: Trace every variable from declaration to usage. If you declare productEl, ensure you don't use prodEl later.
+Syntax Scrub: Check for balanced parentheses, braces, and quotes. A single extra ( or " will crash the process.
+Null Safety: Always assume an element might be missing. Use ?. (optional chaining) for every property access.
+
+5. UNIVERSAL SELECTOR STRATEGY
+Avoid Dynamic Garbage: Never use IDs or classes that look like hashes (e.g., #j82-x9, .a-autoid-3). These are volatile.
+Semantic Anchors: Target stable attributes: [name], [type], [aria-label], [data-*], or clean CSS classes like .product-title.
+Text Anchors: If classes are messy, use evaluate_js to find elements by their innerText or textContent.
+
+6. PERFECT PROGRAMMING (CROSS-PLATFORM)
+When writing scripts, use the "Map-Filter-Reduce" pattern for extraction. It is much harder to break than manual for loops with shared state.
+BAD: let name; if(el) name = el.text;
+GOOD: const name = document.querySelector('...')?.innerText?.trim() ?? 'Unknown';
+
 ## OPERATIONAL CONSTRAINTS
 1. EXECUTION & EFFICIENCY
 SKEPTICAL INTERACTION: Never assume an action succeeded. Every state change is a hypothesis until verified.
 ACTION CHAINING: Execute multiple logical steps (e.g., input + click + wait) within a single epoch's commands array.
-
+ When writing scripts in JavaScript or any other language, write the code carefully. Once drafted, perform an internal "linting" check to ensure no typos (e.g., variable names like liine vs line) and optimize for robustness.
 2. STATE & DATA PERSISTENCE
 STRICT DATA LOGGING: When discovering crucial info (prices, IDs, results), you MUST use the think action to record it as "STRICT RECORD" or "CRUCIAL DATA".
 MEMORY ADHERENCE: Your reasoning history is your primary ledger. DO NOT re-navigate to previously visited pages to retrieve data already stored in a previous think block.
@@ -167,7 +202,7 @@ Assistant: {
   "commands": [
     {
       "action": "evaluate_js",
-      "arguments": ["Array.from(document.querySelectorAll('.product')).filter(el => el.innerText.includes('Free Shipping')).slice(0, 3).map(el => el.querySelector('button.add-to-cart').id)"]
+      "arguments": ["() => { Array.from(document.querySelectorAll('.product')).filter(el => el.innerText.includes('Free Shipping')).slice(0, 3).map(el => el.querySelector('button.add-to-cart').id) }"]
     },
     {"action": "get_html", "arguments": []},
     {"action": "think", "arguments": ["I have executed a JS script to filter specific products. I will check the returned array of IDs to plan my clicks."]}
