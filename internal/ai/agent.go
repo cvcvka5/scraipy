@@ -5,14 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
 )
 
-// Agent handles the stateful conversation with the LLM.
+const (
+	MaxHistoryItems = 6 // Reduced even further to aggressively fight 400 errors
+	MaxRetries      = 5
+	InitialBackoff  = 2 * time.Second
+)
+
 type Agent struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 
 	Key          string        `json:"api_key"`
 	Model        string        `json:"model"`
@@ -20,18 +26,15 @@ type Agent struct {
 	Messages     []ChatMessage `json:"messages"`
 }
 
-// NewAgent creates a fresh agent instance with empty history.
-func NewAgent(key string, model string, systemPrompt string) *Agent {
+func NewAgent(key, model, systemPrompt string) *Agent {
 	return &Agent{
 		Key:          key,
 		Model:        model,
 		SystemPrompt: systemPrompt,
-		Messages:     []ChatMessage{},
+		Messages:     make([]ChatMessage, 0),
 	}
 }
 
-// AddMessage appends a message to history without triggering an API call.
-// This is used for adding browser observations or manual error reports.
 func (a *Agent) AddMessage(role string, parts ...MessagePart) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -41,35 +44,35 @@ func (a *Agent) AddMessage(role string, parts ...MessagePart) {
 	})
 }
 
-// Send manages the full conversation lifecycle:
-// 1. Appends the new user/tool message to history via AddMessage.
-// 2. Sends the full context (System Prompt + History) to the AI.
-// 3. Automatically appends the resulting AI's response to history as an 'assistant'.
 func (a *Agent) Send(role string, parts ...MessagePart) (*ChatResponse, error) {
-	// Add the incoming message to internal history first
 	a.AddMessage(role, parts...)
 
-	// Create a safe copy of messages including the system prompt for the request
-	a.mu.Lock()
-	msgCopy := make([]ChatMessage, 0, len(a.Messages)+1)
-	msgCopy = append(msgCopy, ChatMessage{
+	a.mu.RLock()
+	startIdx := 0
+	if len(a.Messages) > MaxHistoryItems {
+		startIdx = len(a.Messages) - MaxHistoryItems
+	}
+
+	payloadMessages := make([]ChatMessage, 0, (len(a.Messages)-startIdx)+1)
+	payloadMessages = append(payloadMessages, ChatMessage{
 		Role:    "system",
 		Content: []MessagePart{{Type: "text", Text: a.SystemPrompt}},
 	})
-	msgCopy = append(msgCopy, a.Messages...)
-	a.mu.Unlock()
+	payloadMessages = append(payloadMessages, a.Messages[startIdx:]...)
+	a.mu.RUnlock()
 
-	// Execute request with retry logic
-	resp, err := a.executeWithRetry(context.Background(), ChatRequest{
-		Model:    a.Model,
-		Messages: msgCopy,
-	})
+	reqBody := ChatRequest{
+		Model:          a.Model,
+		Messages:       payloadMessages,
+		ResponseFormat: map[string]string{"type": "json_object"},
+	}
+
+	resp, err := a.executeWithRetry(context.Background(), reqBody)
 	if err != nil {
 		return nil, err
 	}
 
-	// Capture and save the Assistant's response to maintain conversation state
-	if resp != nil && len(resp.Choices) > 0 {
+	if len(resp.Choices) > 0 {
 		aiMsg := resp.Choices[0].Message
 		a.AddMessage("assistant", MessagePart{Type: "text", Text: aiMsg.Content})
 	}
@@ -77,41 +80,44 @@ func (a *Agent) Send(role string, parts ...MessagePart) (*ChatResponse, error) {
 	return resp, nil
 }
 
-// executeWithRetry handles transient API errors with exponential backoff.
 func (a *Agent) executeWithRetry(ctx context.Context, body ChatRequest) (*ChatResponse, error) {
 	var lastErr error
-	backoff := 2 * time.Second
+	backoff := InitialBackoff
 
-	for i := 0; i < 5; i++ {
-		resp, err := a.doPost(ctx, body)
+	for i := 0; i < MaxRetries; i++ {
+		httpResp, err := a.doPost(ctx, body)
 
-		// Success case
-		if err == nil && resp.StatusCode == http.StatusOK {
-			defer resp.Body.Close()
+		if err == nil && httpResp.StatusCode == http.StatusOK {
+			defer httpResp.Body.Close()
 			var result ChatResponse
-			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-				return nil, fmt.Errorf("json decode error: %w", err)
+			if err := json.NewDecoder(httpResp.Body).Decode(&result); err != nil {
+				return nil, fmt.Errorf("decode error: %w", err)
 			}
 			return &result, nil
 		}
 
-		// Error tracking
-		lastErr = fmt.Errorf("status %d: %v", getStatus(resp), err)
+		// --- VERBOSE DEBUGGING LOGIC ---
+		if httpResp != nil {
+			bodyBytes, _ := io.ReadAll(httpResp.Body)
+			httpResp.Body.Close()
 
-		// Decide if we should retry
-		if !isRetryable(resp, err) {
-			if resp != nil {
-				resp.Body.Close()
-			}
+			// Print the verbose error from the API provider
+			fmt.Printf("\n[DEBUG] API Status: %d\n", httpResp.StatusCode)
+			fmt.Printf("[DEBUG] API Error Response: %s\n", string(bodyBytes))
+
+			// Check request size
+			reqJson, _ := json.Marshal(body)
+			fmt.Printf("[DEBUG] Payload Size: %d bytes\n", len(reqJson))
+
+			lastErr = fmt.Errorf("status %d: %s", httpResp.StatusCode, string(bodyBytes))
+		} else if err != nil {
+			lastErr = err
+		}
+
+		if !isRetryable(httpResp, err) {
 			break
 		}
 
-		// Close response body before retrying
-		if resp != nil {
-			resp.Body.Close()
-		}
-
-		// Wait with backoff or context cancellation
 		select {
 		case <-time.After(backoff):
 			backoff *= 2
@@ -119,10 +125,9 @@ func (a *Agent) executeWithRetry(ctx context.Context, body ChatRequest) (*ChatRe
 			return nil, ctx.Err()
 		}
 	}
-	return nil, fmt.Errorf("request failed after 5 attempts: %w", lastErr)
+	return nil, fmt.Errorf("agent failed: %w", lastErr)
 }
 
-// doPost performs the actual HTTP POST to the API endpoint.
 func (a *Agent) doPost(ctx context.Context, body ChatRequest) (*http.Response, error) {
 	jsonData, err := json.Marshal(body)
 	if err != nil {
@@ -136,27 +141,14 @@ func (a *Agent) doPost(ctx context.Context, body ChatRequest) (*http.Response, e
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.Key)
-	req.Header.Set("X-Title", "Scraipy Agent")
 
 	return http.DefaultClient.Do(req)
 }
 
-// SendText is a convenience wrapper for plain text messages.
 func (a *Agent) SendText(role, txt string) (*ChatResponse, error) {
 	return a.Send(role, MessagePart{Type: "text", Text: txt})
 }
 
-// SendImage is a convenience wrapper for messages containing an image URL.
-func (a *Agent) SendImage(role, txt, url string) (*ChatResponse, error) {
-	return a.Send(role,
-		MessagePart{Type: "text", Text: txt},
-		MessagePart{Type: "image_url", ImageURL: &struct {
-			URL string `json:"url"`
-		}{URL: url}},
-	)
-}
-
-// getStatus safely extracts the status code from a response.
 func getStatus(r *http.Response) int {
 	if r != nil {
 		return r.StatusCode
@@ -164,12 +156,10 @@ func getStatus(r *http.Response) int {
 	return 0
 }
 
-// isRetryable determines if an error code warrants a retry attempt.
 func isRetryable(r *http.Response, err error) bool {
 	if err != nil {
-		return true // Always retry network errors
+		return true
 	}
 	s := r.StatusCode
-	// Retry on Rate Limits (429), Server Errors (5xx), and Request Timeouts (408).
 	return s == 429 || s >= 500 || s == 408
 }

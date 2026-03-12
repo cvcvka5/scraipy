@@ -8,131 +8,138 @@ import (
 	"github.com/playwright-community/playwright-go"
 )
 
-// Command represents a single instruction from the AI.
-type Command struct {
-	Action    bridge.BrowserAction `json:"action"`
-	Arguments []any                `json:"arguments"`
-}
-
-// Handle executes the command against the browser and returns a message for the AI.
-// It also automatically adds the observation to the agent's memory.
+// Handle executes an AI command against the browser and updates the Agent's memory.
 func (c Command) Handle(ctx playwright.BrowserContext, agent *Agent, currentPage *playwright.Page) (ChatMessage, error) {
-	cm := ChatMessage{
-		Role: "tool",
-	}
+	cm := ChatMessage{Role: "tool"}
 
 	if !c.Action.Validate() {
+		errText := fmt.Sprintf("Error: Action '%s' is not supported.", c.Action)
+		agent.AddMessage("tool", MessagePart{Type: "text", Text: errText})
+		cm.Content = []MessagePart{{Type: "text", Text: errText}}
 		return cm, fmt.Errorf("invalid action: %s", c.Action)
 	}
 
 	var result string
 	var err error
 
-	// Helper to safely convert interface to int (JSON numbers are float64)
+	// Helper to safely convert interface (from JSON) to int.
 	toInt := func(val any) int {
-		if f, ok := val.(float64); ok {
-			return int(f)
-		}
-		if s, ok := val.(string); ok {
-			i, _ := strconv.Atoi(s)
+		switch v := val.(type) {
+		case float64:
+			return int(v)
+		case string:
+			i, _ := strconv.Atoi(v)
 			return i
+		default:
+			return 0
 		}
-		return 0
+	}
+
+	// Helper to safely get string arguments.
+	getStr := func(idx int) string {
+		if idx < len(c.Arguments) {
+			if s, ok := c.Arguments[idx].(string); ok {
+				return s
+			}
+		}
+		return ""
 	}
 
 	switch c.Action {
-	case "think":
-		if len(c.Arguments) > 0 {
-			result = fmt.Sprintf("Thought Logged: %v", c.Arguments[0])
-		} else {
-			result = "Think action executed with no content."
-		}
+	case bridge.ThinkAction:
+		result = fmt.Sprintf("Thought Logged: %s", getStr(0))
 
-	case "get_html":
+	case bridge.GetHTMLAction:
 		result, err = bridge.HandleGetHTML(*currentPage)
 
 	case bridge.NavigateAction:
-		arg := c.Arguments[0].(string)
-		result, err = bridge.HandleNavigate(*currentPage, arg)
+		result, err = bridge.HandleNavigate(*currentPage, getStr(0))
 
 	case bridge.ClickAction:
-		arg := c.Arguments[0].(string)
-		result, err = bridge.HandleClick(*currentPage, arg)
+		result, err = bridge.HandleClick(*currentPage, getStr(0))
 
 	case bridge.InputAction:
-		selector := c.Arguments[0].(string)
-		text := c.Arguments[1].(string)
-		result, err = bridge.HandleInput(*currentPage, selector, text)
+		result, err = bridge.HandleInput(*currentPage, getStr(0), getStr(1))
+
+	case bridge.ClearInputAction:
+		result, err = bridge.HandleClear(*currentPage, getStr(0))
+
+	case bridge.HoverAction:
+		result, err = bridge.HandleHover(*currentPage, getStr(0))
+
+	case bridge.PressAction:
+		result, err = bridge.HandlePress(*currentPage, getStr(0))
+
+	case bridge.BackAction:
+		result, err = bridge.HandleBack(*currentPage)
+
+	case bridge.ForwardAction:
+		result, err = bridge.HandleForward(*currentPage)
+
+	case bridge.DragAndDropAction:
+		result, err = bridge.HandleDragAndDrop(*currentPage, getStr(0), getStr(1))
+
+	case bridge.EvaluateJSAction:
+		result, err = bridge.HandleEval(*currentPage, getStr(0))
 
 	case bridge.LocatorAction:
-		arg := c.Arguments[0].(string)
-		result, err = bridge.HandleLocator(*currentPage, arg)
+		result, err = bridge.HandleLocator(*currentPage, getStr(0))
 
-	case "scroll":
+	case bridge.ScrollAction:
 		if len(c.Arguments) < 2 {
 			err = fmt.Errorf("scroll requires x and y arguments")
 		} else {
-			x := toInt(c.Arguments[0])
-			y := toInt(c.Arguments[1])
-			result, err = bridge.HandleScroll(*currentPage, x, y)
+			result, err = bridge.HandleScroll(*currentPage, toInt(c.Arguments[0]), toInt(c.Arguments[1]))
 		}
 
-	case "refresh":
+	case bridge.RefreshAction:
 		result, err = bridge.HandleRefresh(*currentPage)
 
+	case bridge.SleepAction:
+		result = bridge.HandleSleep(toInt(c.Arguments[0]))
+
 	case bridge.PagesInfoAction:
-		count := bridge.HandlePagesInfo(ctx)
-		result = fmt.Sprintf("Total open pages: %d", count)
+		result = fmt.Sprintf("Total open pages: %d", bridge.HandlePagesInfo(ctx))
 
 	case bridge.NewPageAction:
-		newPage, nerr := bridge.HandleNewPage(ctx)
-		if nerr == nil {
+		var newPage playwright.Page
+		newPage, err = bridge.HandleNewPage(ctx)
+		if err == nil {
 			*currentPage = newPage
-			result = "Opened new page and switched focus to it."
+			result = "Opened new tab and switched focus."
 		}
-		err = nerr
 
 	case bridge.SwitchPageAction:
 		idx := toInt(c.Arguments[0])
-		newPage, serr := bridge.HandleSwitchPage(ctx, idx)
-		if serr == nil {
+		var newPage playwright.Page
+		newPage, err = bridge.HandleSwitchPage(ctx, idx)
+		if err == nil {
 			*currentPage = newPage
-			result = fmt.Sprintf("Switched to page index %d", idx)
+			result = fmt.Sprintf("Switched focus to tab index %d.", idx)
 		}
-		err = serr
 
 	case bridge.ClosePageAction:
 		err = bridge.HandleClosePage(*currentPage)
 		if err == nil {
-			result = "Closed the current page."
+			result = "Closed active tab."
 			pages := ctx.Pages()
 			if len(pages) > 0 {
 				*currentPage = pages[len(pages)-1]
 			}
 		}
 
-	case bridge.SleepAction:
-		secs := toInt(c.Arguments[0])
-		result = bridge.HandleSleep(secs)
-
 	default:
-		err = fmt.Errorf("action %s is recognized but not yet implemented in handler", c.Action)
+		err = fmt.Errorf("action %s validated but missing handler mapping", c.Action)
 	}
 
-	// Handle errors by reporting them back to the AI as an observation
+	// Reporting results back to the Agent.
+	output := fmt.Sprintf("Executed action '%s': %s", c.Action, result)
 	if err != nil {
-		errorText := fmt.Sprintf("Error executing %s: %v", c.Action, err)
-		agent.AddMessage("tool", MessagePart{Type: "text", Text: errorText})
-		cm.Content = []MessagePart{{Type: "text", Text: errorText}}
-		return cm, err
+		output = fmt.Sprintf("Error executing '%s': %v", c.Action, err)
 	}
+	cm.Content = []MessagePart{{Type: "text", Text: output}}
 
-	// Add successful observation to agent memory
-	agent.AddMessage("tool", MessagePart{
-		Type: "text",
-		Text: result,
-	})
+	agent.AddMessage("user", cm.Content...)
 
-	cm.Content = []MessagePart{{Type: "text", Text: result}}
-	return cm, nil
+	return cm, err
 }
